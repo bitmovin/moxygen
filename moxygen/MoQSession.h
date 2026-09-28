@@ -334,6 +334,19 @@ class MoQSession : public Subscriber,
     return transportInfoCacheDuration_;
   }
 
+  // getTransportInfo() and the moment that reading was taken from the
+  // transport. The reading is cached and shared by every caller, so a caller
+  // that turns two readings into a rate needs the time of the reading itself,
+  // not the time it asked.
+  struct TimedTransportInfo {
+    quic::TransportInfo info;
+    std::chrono::steady_clock::time_point takenAt;
+  };
+  [[nodiscard]] TimedTransportInfo getTimedTransportInfo() const {
+    auto info = getTransportInfo();
+    return TimedTransportInfo{std::move(info), lastTransportInfoUpdate_};
+  }
+
   ~MoQSession() override;
 
   void start();
