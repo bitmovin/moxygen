@@ -304,17 +304,34 @@ class MoQSession : public Subscriber,
       return {};
     }
 
-    // Rate limit getTransportInfo calls to at most once per second
+    // Rate limit getTransportInfo calls; see setTransportInfoCacheDuration.
     auto now = std::chrono::steady_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         now - lastTransportInfoUpdate_);
 
-    if (elapsed >= std::chrono::seconds(1)) {
+    if (elapsed >= transportInfoCacheDuration_) {
       cachedTransportInfo_ = wt_->getTransportInfo();
       lastTransportInfoUpdate_ = now;
     }
 
     return cachedTransportInfo_;
+  }
+
+  // How long getTransportInfo() serves a cached reading before asking the
+  // transport again. The default of one second suits stats; a relay that
+  // hands per-viewer congestion figures to a player for bitrate adaptation
+  // wants a reading per group, a few hundred milliseconds. Only lowers the
+  // interval: the shortest interval any caller asked for wins, so one reader
+  // cannot slow another's.
+  void setTransportInfoCacheDuration(std::chrono::milliseconds duration) {
+    if (duration < transportInfoCacheDuration_) {
+      transportInfoCacheDuration_ = duration;
+    }
+  }
+
+  [[nodiscard]] std::chrono::milliseconds getTransportInfoCacheDuration()
+      const noexcept {
+    return transportInfoCacheDuration_;
   }
 
   ~MoQSession() override;
@@ -1462,6 +1479,7 @@ class MoQSession : public Subscriber,
   // Cached transport info to avoid expensive getTransportInfo calls
   mutable quic::TransportInfo cachedTransportInfo_;
   mutable std::chrono::steady_clock::time_point lastTransportInfoUpdate_{};
+  std::chrono::milliseconds transportInfoCacheDuration_{std::chrono::seconds(1)};
   std::unique_ptr<GoawayTimeoutCallback> goawayTimeout_;
   std::optional<CloseResult> closeResult_;
   bool closed_{false};
