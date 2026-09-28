@@ -10,8 +10,10 @@
 #
 # The release is a `snapshot-<sha12>` pre-release at the pushed commit, made by
 # upstream's publish-artifacts.sh so the asset digests are recorded the way the
-# fetch verifies them. Pinned snapshots older than 30 days are pruned, like
-# upstream's; a pin that must outlive that gets a durable tag by hand.
+# fetch verifies them. Nothing is pruned: this branch publishes rarely, and a
+# moqx tag keeps pinning its moxygen revision long after upstream would have
+# pruned the snapshot. Do not add a bare git tag at a pinned revision: the
+# resolver prefers a non-snapshot tag and fails when that tag has no release.
 name: bitmovin prebuilt
 
 on:
@@ -123,5 +125,4 @@ jobs:
             --artifacts-dir artifacts/ \
             --sha "$GITHUB_SHA" \
             --tag "snapshot-$(echo "$GITHUB_SHA" | cut -c1-12)" \
-            --branch "${{ github.ref_name }}" \
-            --prune-days 30
+            --branch "${{ github.ref_name }}"
