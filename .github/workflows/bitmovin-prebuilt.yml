@@ -1,0 +1,127 @@
+# Publish the prebuilt moxygen tarballs that a moqx build fetches for its pin.
+#
+# moqx looks for a tag on this repository that points at its MOXYGEN_REV and a
+# release on that tag carrying moxygen-<platform>.tar.gz; failing that it
+# compiles moxygen and the folly stack itself, about an hour per build. This is
+# upstream's `ci main` publish and release path cut down to the two platforms
+# our builds run on: ubuntu-22.04 (the moqx CI runner) and bookworm (the moqx
+# Docker image). Upstream's matrix also has self-hosted lanes, which a fork has
+# no runners for, and that is why it is not simply reused.
+#
+# The release is a `snapshot-<sha12>` pre-release at the pushed commit, made by
+# upstream's publish-artifacts.sh so the asset digests are recorded the way the
+# fetch verifies them. Pinned snapshots older than 30 days are pruned, like
+# upstream's; a pin that must outlive that gets a durable tag by hand.
+name: bitmovin prebuilt
+
+on:
+  push:
+    branches: [bitmovin]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: github.repository_owner == 'bitmovin'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ubuntu-22.04-amd64
+            artifact: moxygen-ubuntu-22.04-amd64.tar.gz
+            debug_artifact: moxygen-ubuntu-22.04-amd64-dbg.tar.gz
+            container: ""
+          - name: bookworm-amd64
+            artifact: moxygen-bookworm-amd64.tar.gz
+            debug_artifact: moxygen-bookworm-amd64-dbg.tar.gz
+            container: debian:bookworm
+    name: publish (${{ matrix.name }})
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    container:
+      image: ${{ matrix.container || null }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install container base deps
+        if: matrix.container != ''
+        run: |
+          apt_get() { timeout -k 30 600 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 "$@"; }
+          apt_get update
+          apt_get install -y --no-install-recommends \
+            git ca-certificates curl pkg-config sudo bash ccache
+      - name: Install system dependencies
+        run: bash standalone/install-system-deps.sh
+      - name: Cache FetchContent downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            _build/_deps/*-src
+            _build/_deps/*-subbuild
+          key: publish-ninja-${{ matrix.name }}-deps-${{ hashFiles('build/deps/github_hashes/**/*-rev.txt', 'standalone/patches/**') }}
+          restore-keys: |
+            publish-ninja-${{ matrix.name }}-deps-
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: publish-${{ matrix.name }}
+          max-size: 1G
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -B _build -S standalone -G Ninja \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DBUILD_TESTING=OFF \
+            -DBUILD_MOQTEST=ON \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DBUNDLE_DEPS=ON \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/install"
+      - name: Build
+        run: cmake --build _build -j$(getconf _NPROCESSORS_ONLN)
+      - name: Install
+        run: cmake --install _build
+      - name: Package
+        run: |
+          bash openmoq/scripts/collect-artifacts-standalone.sh \
+            --install-prefix "$GITHUB_WORKSPACE/install" \
+            --output "${{ matrix.artifact }}" \
+            --debug-output "${{ matrix.debug_artifact }}"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+          retention-days: 7
+      - name: Upload debug artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.debug_artifact }}
+          path: ${{ matrix.debug_artifact }}
+          retention-days: 7
+
+  release:
+    needs: [publish]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+      - name: Publish pinned snapshot
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash openmoq/scripts/publish-artifacts.sh \
+            --artifacts-dir artifacts/ \
+            --sha "$GITHUB_SHA" \
+            --tag "snapshot-$(echo "$GITHUB_SHA" | cut -c1-12)" \
+            --branch "${{ github.ref_name }}" \
+            --prune-days 30
