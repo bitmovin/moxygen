@@ -4460,6 +4460,14 @@ void MoQSession::onRequestUpdate(RequestUpdate requestUpdate) {
     return;
   }
 
+  // From draft 14 an update takes a fresh request ID but opens nothing under
+  // it: its reply is routed by existingRequestID. Retire the ID here, since
+  // some paths never reply, or every update spends one ID of credit for good
+  // and a subscriber that updates often is closed with TOO_MANY_REQUESTS.
+  if (getDraftMajorVersion(*getNegotiatedVersion()) >= 14) {
+    retireRequestID(/*signalWriteLoop=*/true);
+  }
+
   if (logger_) {
     logger_->logSubscribeUpdate(requestUpdate, ControlMessageType::PARSED);
   }

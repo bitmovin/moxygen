@@ -389,6 +389,75 @@ CO_TEST_P_X(MoQSessionTest, SubscribeRequestUpdateFilterSuccess) {
   clientSession_->close(SessionCloseErrorCode::NO_ERROR);
 }
 
+// Each REQUEST_UPDATE takes a request ID of its own and must give it back,
+// or a subscriber that updates more often than its initial credit allows is
+// closed with TOO_MANY_REQUESTS.
+CO_TEST_P_X(PreDraft18Test, RequestUpdateRetiresItsRequestID) {
+  co_await setupMoQSession();
+  std::shared_ptr<MockSubscriptionHandle> mockSubscriptionHandle = nullptr;
+  std::shared_ptr<TrackConsumer> trackConsumer = nullptr;
+  expectPublishDone();
+  expectSubscribe(
+      [&mockSubscriptionHandle, &trackConsumer](
+          auto sub, auto pub) -> TaskSubscribeResult {
+        trackConsumer = pub;
+        mockSubscriptionHandle =
+            std::make_shared<MockSubscriptionHandle>(SubscribeOk{
+                sub.requestID,
+                TrackAlias(sub.requestID.value),
+                std::chrono::milliseconds(0),
+                GroupOrder::OldestFirst,
+                AbsoluteLocation{0, 0}, // largest object
+            });
+        co_return mockSubscriptionHandle;
+      });
+
+  auto subscribeRequest = getSubscribe(kTestTrackName);
+  auto res =
+      co_await clientSession_->subscribe(subscribeRequest, subscribeCallback_);
+  auto subscribeHandler = res.value();
+  auto maxRequestIDAfterSubscribe = serverSession_->maxRequestID();
+
+  // Three times the whole initial credit.
+  const size_t kUpdates = 3 * kTestMaxRequestID;
+  EXPECT_CALL(*clientSubscriberStatsCallback_, onRequestUpdate())
+      .Times(kUpdates);
+  EXPECT_CALL(*serverPublisherStatsCallback_, onRequestUpdate())
+      .Times(kUpdates);
+  size_t handled = 0;
+  EXPECT_CALL(*mockSubscriptionHandle, requestUpdateCalled)
+      .Times(kUpdates)
+      .WillRepeatedly([&handled](const auto&) { ++handled; });
+  EXPECT_CALL(*mockSubscriptionHandle, requestUpdateResult)
+      .WillRepeatedly(
+          testing::Return(RequestOk{.requestID = subscribeRequest.requestID}));
+  for (size_t i = 0; i < kUpdates; ++i) {
+    SubscribeUpdate update;
+    // Required before draft 15; {0, 0} to an open end never moves the filter.
+    update.start = AbsoluteLocation{0, 0};
+    update.endGroup = 0;
+    update.priority = kDefaultPriority;
+    update.forward = true;
+    co_await subscribeHandler->requestUpdate(update);
+  }
+  // Bounded rather than a baton: without the fix the server closes the
+  // session at the second update, and the rest never arrive.
+  for (int i = 0; i < 100 && handled < kUpdates; ++i) {
+    co_await folly::coro::co_reschedule_on_current_executor;
+  }
+  EXPECT_EQ(handled, kUpdates);
+  EXPECT_GT(serverSession_->maxRequestID(), maxRequestIDAfterSubscribe);
+  if (handled < kUpdates) {
+    clientSession_->close(SessionCloseErrorCode::NO_ERROR);
+    co_return;
+  }
+
+  trackConsumer->publishDone(
+      getTrackEndedPublishDone(subscribeRequest.requestID));
+  co_await publishDone_;
+  clientSession_->close(SessionCloseErrorCode::NO_ERROR);
+}
+
 // Test that missing filter fields in SubscribeUpdate preserve existing values
 CO_TEST_P_X(
     MoQSessionTest,
